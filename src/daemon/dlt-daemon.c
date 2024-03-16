@@ -76,6 +76,7 @@
 #include "dlt_daemon_offline_logstorage.h"
 #include "dlt_gateway.h"
 
+
 #ifdef UDP_CONNECTION_SUPPORT
 #   include "dlt_daemon_udp_socket.h"
 #endif
@@ -1144,6 +1145,7 @@ int main(int argc, char *argv[])
 
         return -1;
     }
+
 
     /* Initialize internal logging facility */
     dlt_log_set_filename(daemon_local.flags.loggingFilename);

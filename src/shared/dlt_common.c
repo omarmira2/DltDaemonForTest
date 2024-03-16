@@ -80,22 +80,7 @@ char dltShmName[NAME_MAX + 1] = "/dlt-shm";
 #endif
 
 /* internal logging parameters */
-static int logging_level = LOG_INFO;
-static char logging_filename[NAME_MAX + 1] = "";
 static bool print_with_attributes = false;
-int logging_mode = DLT_LOG_TO_STDERR;
-FILE *logging_handle = NULL;
-
-//use ohandle as an indicator that multiple files logging is active
-MultipleFilesRingBuffer multiple_files_ring_buffer = {
-        .directory={0},
-        .filename={0},
-        .fileSize=0,
-        .maxSize=0,
-        .filenameTimestampBased=false,
-        .filenameBase={0},
-        .filenameExt={0},
-        .ohandle=-1};
 
 char *message_type[] = { "log", "app_trace", "nw_trace", "control", "", "", "", "" };
 char *log_info[] = { "", "fatal", "error", "warn", "info", "debug", "verbose", "", "", "", "", "", "", "", "", "" };
@@ -1784,31 +1769,6 @@ DltReturnValue dlt_file_free(DltFile *file, int verbose)
     return dlt_message_free(&(file->msg), verbose);
 }
 
-void dlt_log_set_level(int level)
-{
-    if ((level < 0) || (level > LOG_DEBUG)) {
-        if (logging_level < LOG_WARNING)
-            logging_level = LOG_WARNING;
-
-        dlt_vlog(LOG_WARNING, "Wrong parameter for level: %d\n", level);
-    }
-    else {
-        logging_level = level;
-    }
-}
-
-void dlt_log_set_filename(const char *filename)
-{
-    /* check nullpointer */
-    if (filename == NULL) {
-        dlt_log(LOG_WARNING, "Wrong parameter: filename is NULL\n");
-        return;
-    }
-
-    strncpy(logging_filename, filename, NAME_MAX);
-    logging_filename[NAME_MAX] = 0;
-}
-
 #if defined DLT_DAEMON_USE_FIFO_IPC || defined DLT_LIB_USE_FIFO_IPC
 void dlt_log_set_fifo_basedir(const char *pipe_dir)
 {
@@ -1828,263 +1788,6 @@ void dlt_log_set_shm_name(const char *env_shm_name)
 void dlt_print_with_attributes(bool state)
 {
     print_with_attributes = state;
-}
-
-DltReturnValue dlt_log_init(int mode)
-{
-    return dlt_log_init_multiple_logfiles_support((DltLoggingMode)mode, false, 0, 0);
-}
-
-DltReturnValue dlt_log_init_multiple_logfiles_support(const DltLoggingMode mode, const bool enable_multiple_logfiles,
-                                            const int logging_file_size, const int logging_files_max_size)
-{
-    if ((mode < DLT_LOG_TO_CONSOLE) || (mode > DLT_LOG_DROPPED)) {
-        dlt_vlog(LOG_WARNING, "Wrong parameter for mode: %d\n", mode);
-        return DLT_RETURN_WRONG_PARAMETER;
-    }
-
-    logging_mode = mode;
-
-    if (logging_mode != DLT_LOG_TO_FILE) {
-        return DLT_RETURN_OK;
-    }
-
-    if (enable_multiple_logfiles) {
-        dlt_user_printf("configure dlt logging using file limits\n");
-        int result = dlt_log_init_multiple_logfiles(logging_file_size, logging_files_max_size);
-        if (result == DLT_RETURN_OK) {
-            return DLT_RETURN_OK;
-        }
-        dlt_user_printf("dlt logging for limits fails with error code=%d, use logging without limits as fallback\n", result);
-        return dlt_log_init_single_logfile();
-    } else {
-        dlt_user_printf("configure dlt logging without file limits\n");
-        return dlt_log_init_single_logfile();
-    }
-}
-
-DltReturnValue dlt_log_init_single_logfile()
-{
-    /* internal logging to file */
-    errno = 0;
-    logging_handle = fopen(logging_filename, "a");
-
-    if (logging_handle == NULL) {
-        dlt_user_printf("Internal log file %s cannot be opened, error: %s\n", logging_filename, strerror(errno));
-        return DLT_RETURN_ERROR;
-    }
-    return DLT_RETURN_OK;
-}
-
-DltReturnValue dlt_log_init_multiple_logfiles(const int logging_file_size, const int logging_files_max_size)
-{
-    char path_logging_filename[PATH_MAX + 1];
-    strncpy(path_logging_filename, logging_filename, PATH_MAX);
-    path_logging_filename[PATH_MAX] = 0;
-
-    const char *directory = dirname(path_logging_filename);
-    if (directory[0]) {
-        char basename_logging_filename[NAME_MAX + 1];
-        strncpy(basename_logging_filename, logging_filename, NAME_MAX);
-        basename_logging_filename[NAME_MAX] = 0;
-
-        const char *file_name = basename(basename_logging_filename);
-        char filename_base[NAME_MAX];
-        if (!dlt_extract_base_name_without_ext(file_name, filename_base, sizeof(filename_base))) return DLT_RETURN_ERROR;
-
-        const char *filename_ext = get_filename_ext(file_name);
-        if (!filename_ext) return DLT_RETURN_ERROR;
-
-        DltReturnValue result = multiple_files_buffer_init(
-                &multiple_files_ring_buffer,
-                directory,
-                logging_file_size,
-                logging_files_max_size,
-                false,
-                true,
-                filename_base,
-                filename_ext);
-
-        return result;
-    }
-
-    return DLT_RETURN_ERROR;
-}
-
-void dlt_log_free(void)
-{
-    if (logging_mode == DLT_LOG_TO_FILE) {
-        if (dlt_is_log_in_multiple_files_active()) {
-            dlt_log_free_multiple_logfiles();
-        } else {
-            dlt_log_free_single_logfile();
-        }
-    }
-}
-
-void dlt_log_free_single_logfile()
-{
-    if (logging_handle)
-        fclose(logging_handle);
-}
-
-void dlt_log_free_multiple_logfiles()
-{
-    if (DLT_RETURN_ERROR == multiple_files_buffer_free(&multiple_files_ring_buffer)) return;
-
-    // reset indicator of multiple files usage
-    multiple_files_ring_buffer.ohandle = -1;
-}
-
-int dlt_user_printf(const char *format, ...)
-{
-    if (format == NULL) return -1;
-
-    va_list args;
-    va_start(args, format);
-
-    int ret = 0;
-
-    switch (logging_mode) {
-    case DLT_LOG_TO_CONSOLE:
-    case DLT_LOG_TO_SYSLOG:
-    case DLT_LOG_TO_FILE:
-    case DLT_LOG_DROPPED:
-    default:
-        ret = vfprintf(stdout, format, args);
-        break;
-    case DLT_LOG_TO_STDERR:
-        ret = vfprintf(stderr, format, args);
-        break;
-    }
-
-    va_end(args);
-
-    return ret;
-}
-
-DltReturnValue dlt_log(int prio, char *s)
-{
-    static const char asSeverity[LOG_DEBUG +
-                                 2][11] =
-    { "EMERGENCY", "ALERT    ", "CRITICAL ", "ERROR    ", "WARNING  ", "NOTICE   ", "INFO     ", "DEBUG    ",
-      "         " };
-    static const char sFormatString[] = "[%5u.%06u]~DLT~%5d~%s~%s";
-    struct timespec sTimeSpec;
-
-    if (s == NULL)
-        return DLT_RETURN_WRONG_PARAMETER;
-
-    if (logging_level < prio)
-        return DLT_RETURN_OK;
-
-    if ((prio < 0) || (prio > LOG_DEBUG))
-        prio = LOG_DEBUG + 1;
-
-    clock_gettime(CLOCK_MONOTONIC, &sTimeSpec);
-
-    switch (logging_mode) {
-    case DLT_LOG_TO_CONSOLE:
-        /* log to stdout */
-        fprintf(stdout, sFormatString,
-                (unsigned int)sTimeSpec.tv_sec,
-                (unsigned int)(sTimeSpec.tv_nsec / 1000),
-                getpid(),
-                asSeverity[prio],
-                s);
-        fflush(stdout);
-        break;
-    case DLT_LOG_TO_STDERR:
-        /* log to stderr */
-        fprintf(stderr, sFormatString,
-                (unsigned int)sTimeSpec.tv_sec,
-                (unsigned int)(sTimeSpec.tv_nsec / 1000),
-                getpid(),
-                asSeverity[prio],
-                s);
-        break;
-    case DLT_LOG_TO_SYSLOG:
-        /* log to syslog */
-#if !defined (__WIN32__) && !defined(_MSC_VER)
-        openlog("DLT", LOG_PID, LOG_DAEMON);
-        syslog(prio,
-               sFormatString,
-               (unsigned int)sTimeSpec.tv_sec,
-               (unsigned int)(sTimeSpec.tv_nsec / 1000),
-               getpid(),
-               asSeverity[prio],
-               s);
-        closelog();
-#endif
-        break;
-    case DLT_LOG_TO_FILE:
-        /* log to file */
-
-        if (dlt_is_log_in_multiple_files_active()) {
-            dlt_log_multiple_files_write(sFormatString, (unsigned int)sTimeSpec.tv_sec,
-                                         (unsigned int)(sTimeSpec.tv_nsec / 1000), getpid(), asSeverity[prio], s);
-        }
-        else if (logging_handle) {
-            fprintf(logging_handle, sFormatString, (unsigned int)sTimeSpec.tv_sec,
-                    (unsigned int)(sTimeSpec.tv_nsec / 1000), getpid(), asSeverity[prio], s);
-            fflush(logging_handle);
-        }
-
-        break;
-    case DLT_LOG_DROPPED:
-    default:
-        break;
-    }
-
-    return DLT_RETURN_OK;
-}
-
-DltReturnValue dlt_vlog(int prio, const char *format, ...)
-{
-    char outputString[2048] = { 0 }; /* TODO: what is a reasonable string length here? */
-
-    va_list args;
-
-    if (format == NULL)
-        return DLT_RETURN_WRONG_PARAMETER;
-
-    if (logging_level < prio)
-        return DLT_RETURN_OK;
-
-    va_start(args, format);
-    vsnprintf(outputString, 2047, format, args);
-    va_end(args);
-
-    dlt_log(prio, outputString);
-
-    return DLT_RETURN_OK;
-}
-
-DltReturnValue dlt_vnlog(int prio, size_t size, const char *format, ...)
-{
-    char *outputString = NULL;
-
-    va_list args;
-
-    if (format == NULL)
-        return DLT_RETURN_WRONG_PARAMETER;
-
-    if ((logging_level < prio) || (size == 0))
-        return DLT_RETURN_OK;
-
-    if ((outputString = (char *)calloc(size + 1, sizeof(char))) == NULL)
-        return DLT_RETURN_ERROR;
-
-    va_start(args, format);
-    vsnprintf(outputString, size, format, args);
-    va_end(args);
-
-    dlt_log(prio, outputString);
-
-    free(outputString);
-    outputString = NULL;
-
-    return DLT_RETURN_OK;
 }
 
 DltReturnValue dlt_receiver_init(DltReceiver *receiver, int fd, DltReceiverType type, int buffersize)
@@ -4436,17 +4139,297 @@ bool dlt_extract_base_name_without_ext(const char* const abs_file_name, char* ba
     return true;
 }
 
-void dlt_log_multiple_files_write(const char* format, ...)
+#ifdef DLT_TRACE_LOAD_CTRL_ENABLE
+
+static int32_t dlt_output_soft_limit_over_warning(
+        DltTraceLoadStat *const tl_stat,
+        DltLogInternal log_internal,
+        const uint32_t soft_limit,
+        void *const log_params)
 {
-    char output_string[2048] = { 0 };
-    va_list args;
-    va_start (args, format);
-    vsnprintf(output_string, 2047, format, args);
-    va_end (args);
-    multiple_files_buffer_write(&multiple_files_ring_buffer, (unsigned char*)output_string, strlen(output_string));
+    char local_str[255];
+
+    if (!tl_stat || !tl_stat->is_over_soft_limit || tl_stat->slot_left_soft_limit_warn)
+    {
+        /* No need to output warning message */
+        return 0;
+    }
+
+    /* Calculate extra trace load which was over limit */
+    const uint64_t dropped_message_load
+        = (tl_stat->hard_limit_over_bytes * DLT_TIMESTAMP_RESOLUTION)
+                / TIMESTAMP_BASED_WINDOW_SIZE;
+    const uint64_t curr_trace_load = tl_stat->avg_trace_load + dropped_message_load;
+
+    /* Warning for exceeded soft limit */
+    snprintf(local_str, sizeof(local_str),
+             "Trace load exceeded trace soft limit."
+             "(soft limit: %u bytes/sec, current: %lu bytes/sec",
+             soft_limit,
+             curr_trace_load);
+
+    // must be signed int for error return value
+    int32_t sent_size = log_internal(DLT_LOG_WARN, local_str, log_params);
+    if (sent_size < DLT_RETURN_OK)
+    {
+        /* Output warning message via other route for safety */
+        dlt_log(DLT_LOG_WARN, local_str);
+        sent_size = 0;
+    }
+
+    /* Turn off the flag after sending warning message */
+    tl_stat->is_over_soft_limit = false;
+    tl_stat->slot_left_soft_limit_warn = DLT_SOFT_LIMIT_WARN_FREQUENCY;
+
+    return sent_size;
 }
 
-bool dlt_is_log_in_multiple_files_active()
+static int32_t dlt_output_hard_limit_warning(
+        DltTraceLoadStat *const tl_stat,
+        DltLogInternal log_internal,
+        const uint32_t hard_limit,
+        void *const log_params)
 {
-    return multiple_files_ring_buffer.ohandle > -1;
+    char local_str[255];
+    if (!tl_stat || !tl_stat->is_over_hard_limit || tl_stat->slot_left_hard_limit_warn)
+    {
+        /* No need to output warning message */
+        return 0;
+    }
+
+    /* Calculate extra trace load which was over limit */
+    const uint64_t dropped_message_load
+        = (tl_stat->hard_limit_over_bytes * DLT_TIMESTAMP_RESOLUTION)
+                / TIMESTAMP_BASED_WINDOW_SIZE;
+    const uint64_t curr_trace_load = tl_stat->avg_trace_load + dropped_message_load;
+
+    snprintf(local_str, sizeof(local_str),
+             "Trace load exceeded trace hard limit."
+             "(hard limit: %u bytes/sec, current: %lu bytes/sec) %u messages discarded.",
+             hard_limit,
+             curr_trace_load,
+             tl_stat->hard_limit_over_counter);
+
+    // must be signed int for error return
+    int32_t sent_size = log_internal(DLT_LOG_WARN, local_str, log_params);
+    if (sent_size < DLT_RETURN_OK)
+    {
+        /* Output warning message via other route for safety */
+        dlt_log(DLT_LOG_WARN, local_str);
+        sent_size = 0;
+    }
+
+    /* Turn off the flag after sending warning message */
+    tl_stat->is_over_hard_limit = false;
+    tl_stat->hard_limit_over_counter = 0;
+    tl_stat->hard_limit_over_bytes = 0;
+    tl_stat->slot_left_hard_limit_warn = DLT_HARD_LIMIT_WARN_FREQUENCY;
+
+    return sent_size;
 }
+
+static bool dlt_user_cleanup_window(DltTraceLoadStat *const tl_stat)
+{
+    if (!tl_stat)
+    {
+        return false;
+    }
+
+    uint32_t elapsed_slots  = 0;
+    /* check if overflow of timestamp happened, after ~119 hours */
+    if (tl_stat->curr_abs_slot < tl_stat->last_abs_slot) {
+        /* calculate where the next slot starts according to the last slot
+         * This works because the value after the uint32 rollover equals is equal to the remainder that did not fit
+         * into uint32 before. Therefore, we always have slots that are DLT_TIMESTAMP_RESOLUTION long
+         * */
+        const uint32_t next_slot_start =
+                DLT_TIMESTAMP_RESOLUTION + tl_stat->last_abs_slot;
+
+        /* Check if we are already in the next slot */
+        if (next_slot_start <= tl_stat->curr_abs_slot) {
+            /* Calculate relative amount of elapsed slots */
+            elapsed_slots = (tl_stat->curr_abs_slot - next_slot_start) / DLT_TIMESTAMP_RESOLUTION + 1;
+        }
+        /* else we are not in the next slot yet */
+    } else {
+        /* no rollover, get difference between slots to get amount of elapsed slots  */
+        elapsed_slots = (tl_stat->curr_abs_slot - tl_stat->last_abs_slot);
+    }
+
+    if (!elapsed_slots)
+    {
+        /* Same slot can be still used. No need to cleanup slot */
+        return false;
+    }
+
+    /* Slot-Based Count down for next warning messages */
+    tl_stat->slot_left_soft_limit_warn = (tl_stat->slot_left_soft_limit_warn > elapsed_slots) ?
+            (tl_stat->slot_left_soft_limit_warn - elapsed_slots) : 0;
+
+    tl_stat->slot_left_hard_limit_warn = (tl_stat->slot_left_hard_limit_warn > elapsed_slots) ?
+            (tl_stat->slot_left_hard_limit_warn - elapsed_slots) : 0;
+
+    /* Clear whole window when time elapsed longer than window size from last message */
+    if (elapsed_slots >= DLT_TRACE_LOAD_WINDOW_SIZE)
+    {
+        tl_stat->total_bytes_of_window = 0;
+        memset(tl_stat->window, 0, sizeof(tl_stat->window));
+        return true;
+    }
+
+    /* Clear skipped no data slots */
+    uint32_t temp_slot = tl_stat->last_slot;
+    while (temp_slot != tl_stat->curr_slot)
+    {
+        temp_slot++;
+        temp_slot %= DLT_TRACE_LOAD_WINDOW_SIZE;
+        tl_stat->total_bytes_of_window -= tl_stat->window[temp_slot];
+        tl_stat->window[temp_slot] = 0;
+    }
+
+    return true;
+}
+
+static int32_t dlt_switch_slot_if_needed(
+        DltTraceLoadStat *const tl_stat,
+        DltLogInternal log_internal,
+        void* const log_internal_params,
+        const uint32_t timestamp,
+        const uint32_t hard_limit,
+        const uint32_t soft_limit)
+{
+    if (!tl_stat)
+    {
+        return 0;
+    }
+
+    /* Get new window slot No. */
+    tl_stat->curr_abs_slot = timestamp / DLT_TRACE_LOAD_WINDOW_RESOLUTION;
+    tl_stat->curr_slot = tl_stat->curr_abs_slot % DLT_TRACE_LOAD_WINDOW_SIZE;
+
+    /* Cleanup window */
+    if (!dlt_user_cleanup_window(tl_stat))
+    {
+        /* No need to switch slot because same slot can be still used */
+        return 0;
+    }
+
+    /* If slot is switched and trace load has been over soft/hard limit
+     * in previous slot, warning messages may be sent.
+     * The warning messages will be also counted as trace load.
+     */
+    const int32_t sent_warn_msg_bytes =
+            dlt_output_soft_limit_over_warning(tl_stat, log_internal, soft_limit, log_internal_params) +
+            dlt_output_hard_limit_warning(tl_stat, log_internal, hard_limit, log_internal_params);
+    return sent_warn_msg_bytes;
+}
+
+static void dlt_record_trace_load(DltTraceLoadStat *const tl_stat, const int32_t size)
+{
+    if (!tl_stat)
+    {
+        return;
+    }
+
+    /* Record trace load to current slot by message size of
+     * original message and warning message if it was sent
+     */
+    tl_stat->window[tl_stat->curr_slot] += size;
+    tl_stat->total_bytes_of_window += size;
+
+    /* Keep the latest time information */
+    tl_stat->last_abs_slot = tl_stat->curr_abs_slot;
+    tl_stat->last_slot = tl_stat->curr_slot;
+
+    /* Calculate average trace load [bytes/sec] in window
+     * The division is necessary to normalize the average to bytes per second even if
+     * the slot size is not equal to 1s
+     * */
+    tl_stat->avg_trace_load
+        = (tl_stat->total_bytes_of_window * DLT_TIMESTAMP_RESOLUTION) / TIMESTAMP_BASED_WINDOW_SIZE;
+}
+
+static inline bool dlt_is_over_trace_load_soft_limit(DltTraceLoadStat *const tl_stat, const uint32_t soft_limit)
+{
+    if (tl_stat
+        && (tl_stat->avg_trace_load > soft_limit || soft_limit == 0))
+    {
+        /* Mark as soft limit over */
+        tl_stat->is_over_soft_limit = true;
+        return true;
+    }
+
+    return false;
+}
+
+static inline bool dlt_is_over_trace_load_hard_limit(
+        DltTraceLoadStat *const tl_stat, const uint32_t hard_limit, const int size)
+{
+    if (tl_stat
+        && (tl_stat->avg_trace_load > hard_limit || hard_limit == 0))
+    {
+        /* Mark as limit over */
+        tl_stat->is_over_hard_limit = true;
+        tl_stat->hard_limit_over_counter++;
+        tl_stat->hard_limit_over_bytes += size;
+
+        /* Delete size of limit over message from window */
+        tl_stat->window[tl_stat->curr_slot] -= size;
+        tl_stat->total_bytes_of_window -= size;
+        return true;
+    }
+
+    return false;
+}
+
+bool dlt_check_trace_load(
+        DltTraceLoadStat* const tl_stat,
+        const int32_t log_level,
+        const uint32_t timestamp,
+        const int32_t size,
+        DltLogInternal internal_dlt_log,
+        void* const internal_dlt_log_params,
+        const uint32_t soft_limit,
+        const uint32_t hard_limit)
+{
+    /* Unconditionally allow message which has log level: Debug/Verbose to be output */
+    if (log_level == DLT_LOG_DEBUG || log_level == DLT_LOG_VERBOSE)
+    {
+        return true;
+    }
+
+    if (size < 0)
+    {
+        dlt_vlog(LOG_ERR, "Invalid size: %d", size);
+        return false;
+    }
+
+    pthread_rwlock_rdlock(&trace_load_rw_lock);
+
+    /* Switch window slot according to timestamp
+     * If warning messages for hard/soft limit over are sent,
+     * the message size will be returned.
+     */
+    const int32_t sent_warn_msg_bytes = dlt_switch_slot_if_needed(
+            tl_stat, internal_dlt_log, internal_dlt_log_params, timestamp, hard_limit, soft_limit);
+
+    /* Record trace load */
+    dlt_record_trace_load(tl_stat, size + sent_warn_msg_bytes);
+
+    /* Check if trace load is over the soft limit.
+     * Even if trace load is over the soft limit, message will not be discarded.
+     * Only the warning message will be output
+     */
+    dlt_is_over_trace_load_soft_limit(tl_stat, soft_limit);
+
+    /* Check if trace load is over hard limit.
+     * If trace load is over the limit, message will be discarded.
+     */
+    const bool allow_output = !dlt_is_over_trace_load_hard_limit(tl_stat, hard_limit, size);
+
+    pthread_rwlock_unlock(&trace_load_rw_lock);
+
+    return allow_output;
+}
+
+#endif
